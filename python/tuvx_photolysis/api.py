@@ -20,8 +20,13 @@ from pathlib import Path
 
 import numpy as np
 
-from . import data, cross_section, profiles, radiators, solver, geometry, photolysis
-from .quantum_yield import ConstantQuantumYield, TabulatedQuantumYield
+from . import data, cross_section, profiles, radiators, solver, geometry, photolysis, special
+from .quantum_yield import (
+    ConstantQuantumYield,
+    TabulatedQuantumYield,
+    TintQuantumYield,
+    clono2_quantum_yield,
+)
 
 __all__ = ["PhotolysisCalculator"]
 
@@ -157,8 +162,8 @@ class PhotolysisCalculator:
                 skipped[name] = "needs Lyman-alpha/Schumann-Runge bands (deferred)"
                 continue
             try:
-                sigma = _eval_reaction_xs(xs, rel, wl_edges, temperature, n_lev)
-                phi = _eval_reaction_qy(qy, rel, wl_edges, n_lev, wl_mid.size)
+                sigma = _eval_reaction_xs(xs, rel, wl_edges, wl_mid, temperature, n_lev)
+                phi = _eval_reaction_qy(qy, rel, wl_edges, wl_mid, temperature, n_lev, wl_mid.size)
             except _Unsupported as exc:
                 skipped[name] = str(exc)
                 continue
@@ -197,17 +202,51 @@ def _build_o3_tint(xs_cfg, rel, wl_edges):
     return cross_section.O3TintCrossSection.from_files(tds, wl_edges)
 
 
-def _eval_reaction_xs(xs_cfg, rel, wl_edges, temperature, n_lev):
+def _tds(xs_cfg, rel):
+    return [data.load_cross_section(rel(nf["file path"])) for nf in xs_cfg["netcdf files"]]
+
+
+def _eval_reaction_xs(xs_cfg, rel, wl_edges, wl_mid, temperature, n_lev):
     t = xs_cfg.get("type")
+    Te = temperature.edge_val  # photolysis cross sections are evaluated at interfaces
     if t == "base":
         return _build_base_xs(xs_cfg, rel, wl_edges).evaluate(n_lev)
     if t == "O3":
-        return _build_o3_tint(xs_cfg, rel, wl_edges).evaluate(temperature.edge_val)
+        return _build_o3_tint(xs_cfg, rel, wl_edges).evaluate(Te)
+    if t == "Cl2+hv->Cl+Cl":
+        return special.cl2_cross_section(wl_mid, Te)
+    if t == "HOBr+hv->OH+Br":
+        return special.hobr_cross_section(wl_mid, n_lev)
+    if t == "HNO3+hv->OH+NO2":
+        return special.HNO3CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "N2O5+hv->NO2+NO3":
+        tds = _tds(xs_cfg, rel)
+        return special.N2O5CrossSection.from_files(tds[0], tds[1], wl_edges).evaluate(Te)
+    if t == "ClONO2":
+        return special.ClONO2CrossSection.from_file(_tds(xs_cfg, rel)[0], wl_edges).evaluate(Te)
+    if t == "NO2 tint":
+        return special.TintCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
+    if t == "OClO+hv->Products":
+        return special.OCloCrossSection.from_files(_tds(xs_cfg, rel), wl_edges).evaluate(Te)
     raise _Unsupported(f"cross section type '{t}' not ported")
 
 
-def _eval_reaction_qy(qy_cfg, rel, wl_edges, n_lev, n_wl):
+def _eval_reaction_qy(qy_cfg, rel, wl_edges, wl_mid, temperature, n_lev, n_wl):
     t = qy_cfg.get("type")
+    if t in ("ClONO2+hv->Cl+NO3", "ClONO2+hv->ClO+NO2"):
+        branch = "Cl+NO3" if t.endswith("Cl+NO3") else "ClO+NO2"
+        return clono2_quantum_yield(wl_mid, n_lev, branch)
+    if t in ("tint", "NO2 tint"):
+        paths = [f["file path"] if isinstance(f, dict) else f for f in qy_cfg["netcdf files"]]
+        tds = [data.load_quantum_yield(rel(p)) for p in paths]
+        lo = qy_cfg.get("lower extrapolation") or {}
+        up = qy_cfg.get("upper extrapolation") or {}
+        return TintQuantumYield.from_netcdf(
+            tds, wl_edges,
+            lower_extrapolation=lo.get("type"), upper_extrapolation=up.get("type"),
+            lower_value=lo.get("value", 0.0), upper_value=up.get("value", 0.0),
+            extrapolate=(t == "NO2 tint"),  # NO2 tint extrapolates in T; generic tint clamps
+        ).evaluate(temperature.edge_val)
     if t != "base":
         raise _Unsupported(f"quantum yield type '{t}' not ported")
     if "constant value" in qy_cfg:
