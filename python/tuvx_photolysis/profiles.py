@@ -29,14 +29,25 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .data import AtmosphereProfile
-from .grids import interp_linear
+from .data import AtmosphereProfile, SolarFlux
+from .grids import interp_linear, interp_conserving, interp_fractional_target
 
-__all__ = ["Profile", "air_profile", "o2_profile", "o3_profile", "temperature_profile"]
+__all__ = [
+    "Profile",
+    "air_profile",
+    "o2_profile",
+    "o3_profile",
+    "temperature_profile",
+    "extraterrestrial_flux",
+]
 
 _KM2CM = 1.0e5
 _DU = 2.687e16  # molecule cm-2 per Dobson Unit
 _O2_VMR = 0.2095
+_HC = 6.626068e-34 * 2.99792458e8  # Planck constant x speed of light [J m]
+_DELTAX = 1.0e-5
+# wavelength ranges each solar-flux file covers (extraterrestrial_flux.F90 bin_edge)
+_ETFL_BIN_EDGES = (0.0, 150.01, 200.07, 1000.99, np.inf)
 
 
 @dataclass
@@ -123,6 +134,73 @@ def o3_profile(
             layer_dens[-1] = layer_dens[-1] + edge_val[-1] * scale_height * _KM2CM
 
     return Profile(edge_val=edge_val, mid_val=mid_val, layer_dens=layer_dens)
+
+
+def _pad_flux(grid, datav):
+    """Pad a flux dataset with zero endpoints so it spans the grid (extraterrestrial_flux.F90)."""
+    x = np.asarray(grid, dtype=float).copy()
+    y = np.asarray(datav, dtype=float).copy()
+    pts = [
+        ((1.0 - _DELTAX) * x[0], 0.0),
+        (0.0, 0.0),
+        ((1.0 + _DELTAX) * x[-1], 0.0),
+        (1.0e38, 0.0),
+    ]
+    for xn, yn in pts:
+        idx = int(np.searchsorted(x, xn))
+        x = np.insert(x, idx, xn)
+        y = np.insert(y, idx, yn)
+    return x, y
+
+
+def extraterrestrial_flux(wl_edges, files) -> np.ndarray:
+    """Build the extraterrestrial flux per wavelength bin [photon cm-2 s-1] (ports the F90 profile).
+
+    ``files`` is a list of ``(SolarFlux, interpolator)`` in the standard order
+    [susim, atlas3, sao2010, neckel]; each file supplies the flux over its wavelength band
+    (band edges ``[0, 150.01, 200.07, 1000.99, inf]``). Non-neckel files are zero-padded and
+    interpolated (default ``"conserving"``); neckel is converted from photon units back to
+    W m-2 nm-1 with a per-range grid shift, then interpolated (``"fractional target"``). The combined
+    W m-2 nm-1 spectrum is converted to per-bin photon flux via ``1e-13 * etfl * lambda * dlambda /
+    hc``.
+    """
+    wl_edges = np.asarray(wl_edges, dtype=float)
+    wl_lower = wl_edges[:-1]
+    wl_mid = 0.5 * (wl_edges[:-1] + wl_edges[1:])
+    wl_delta = np.diff(wl_edges)
+    etfl = np.zeros(wl_edges.size - 1)
+
+    for i, (flux, interp) in enumerate(files):
+        if interp in (None, ""):
+            interp = "conserving"
+        grid = np.asarray(flux.wavelength, dtype=float)
+        datav = np.asarray(flux.flux, dtype=float)
+
+        is_neckel = i == 3  # 4th file in the standard ordering
+        if is_neckel:
+            shifted = grid.copy()
+            shifted[grid < 630.0] = grid[grid < 630.0] - 0.5
+            mid = (grid >= 630.0) & (grid < 870.0)
+            shifted[mid] = grid[mid] - 1.0
+            shifted[grid >= 870.0] = grid[grid >= 870.0] - 2.5
+            datav = 1.0e13 * _HC * datav / grid  # photons cm-2 s-1 nm-1 -> W m-2 nm-1
+            grid = np.append(shifted, shifted[-1] + 2.5)
+            datav = np.append(datav, 0.0)
+        else:
+            grid, datav = _pad_flux(grid, datav)
+
+        if interp == "conserving":
+            interpolated = interp_conserving(wl_edges, grid, datav)
+        elif interp == "fractional target":
+            interpolated = interp_fractional_target(wl_edges, grid, datav)
+        else:
+            raise ValueError(f"unsupported etfl interpolator: {interp}")
+
+        in_band = (_ETFL_BIN_EDGES[i] <= wl_lower) & (wl_lower < _ETFL_BIN_EDGES[i + 1])
+        etfl = np.where(in_band, interpolated, etfl)
+
+    # W m-2 nm-1 -> per-bin photon flux [photon cm-2 s-1]
+    return 1.0e-13 * etfl * wl_mid * wl_delta / _HC
 
 
 def temperature_profile(height_edges_km, temperature: AtmosphereProfile) -> Profile:

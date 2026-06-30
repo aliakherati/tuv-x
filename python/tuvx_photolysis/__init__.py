@@ -21,7 +21,6 @@ import jax as _jax
 
 _jax.config.update("jax_enable_x64", True)
 
-# Public API is wired up incrementally as the modules land (see plan stages).
-# from .api import PhotolysisCalculator  # noqa: F401  (enabled in Stage 7)
+from .api import PhotolysisCalculator  # noqa: E402,F401
 
-__all__ = ["__version__"]
+__all__ = ["__version__", "PhotolysisCalculator"]

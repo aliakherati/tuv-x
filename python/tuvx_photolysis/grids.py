@@ -22,7 +22,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["Grid", "interp_linear", "interp_conserving", "interp_fractional_source"]
+__all__ = [
+    "Grid",
+    "interp_linear",
+    "interp_conserving",
+    "interp_fractional_source",
+    "interp_fractional_target",
+]
 
 
 @dataclass
@@ -135,9 +141,8 @@ def interp_fractional_source(
     yfrom = np.asarray(y_source, dtype=float)
     nto = xto.size
     nfrom = xfrom.size
-    if yfrom.size != nfrom - 1:
-        raise ValueError("y_source must have one value per source bin (len(x_source_edges) - 1)")
-
+    if yfrom.size < nfrom - 1:
+        raise ValueError("y_source must have at least one value per source bin")
     ntobins = nto - 1
     yto = np.zeros(ntobins)
     jstart = 0  # 0-based source-bin index
@@ -168,3 +173,56 @@ def interp_fractional_source(
                 tail += yfrom[k] * (xfrom[k + 1] - xfrom[k])
             yto[ntobins - 1] += tail
     return yto
+
+
+def interp_fractional_target(
+    x_target_edges: np.ndarray,
+    x_source_edges: np.ndarray,
+    y_source: np.ndarray,
+    fold_in: bool = False,
+) -> np.ndarray:
+    """Rebin binned data onto target bins by fractional overlap (target-width normalized).
+
+    Like :func:`interp_fractional_source` but each target bin sums ``y_source * overlap_width`` and
+    divides by the *target* bin width. Ports ``interpolate_fractional_target`` in
+    ``src/interpolate.F90``. With ``fold_in=True`` the source overhang beyond the last target edge
+    is folded into the last target bin. ``y_source`` has at least one value per source bin.
+    """
+    xto = np.asarray(x_target_edges, dtype=float)
+    xfrom = np.asarray(x_source_edges, dtype=float)
+    yfrom = np.asarray(y_source, dtype=float)
+    nfrom = xfrom.size
+    nto = xto.size
+    if yfrom.size < nfrom - 1:
+        raise ValueError("y_source must have at least one value per source bin")
+
+    ntobins = nto - 1
+    out = np.zeros(ntobins)
+    jstart = 0
+    j = jstart
+    for i in range(ntobins):
+        s = 0.0
+        j = jstart
+        if j < nfrom - 1:
+            while xfrom[j + 1] < xto[i]:
+                jstart = j
+                j += 1
+                if j >= nfrom - 1:
+                    break
+            while j < nfrom - 1 and xfrom[j] <= xto[i + 1]:
+                a1 = max(xfrom[j], xto[i])
+                a2 = min(xfrom[j + 1], xto[i + 1])
+                s += yfrom[j] * (a2 - a1)
+                j += 1
+            out[i] = s / (xto[i + 1] - xto[i])
+
+    if fold_in:
+        j -= 1
+        a1 = xto[nto - 1]
+        a2 = xfrom[j + 1]
+        if a2 > a1 or (j + 1) < (nfrom - 1):
+            tail = yfrom[j] * (a2 - a1) / (xfrom[j + 1] - xfrom[j])
+            for k in range(j + 1, nfrom - 1):
+                tail += yfrom[k] * (xfrom[k + 1] - xfrom[k])
+            out[ntobins - 1] += tail  # Fortran adds the tail without target-width division
+    return out

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .data import TabulatedData
-from .grids import interp_conserving
+from .grids import interp_conserving, interp_fractional_source, interp_fractional_target
 
 __all__ = [
     "refraction",
@@ -100,10 +100,24 @@ def add_points(
     return x, y
 
 
-def _rebin_param(data_lambda, data_param, wl_edges, lower_extrap, upper_extrap):
-    """add_points then area-conserving rebin of one parameter column onto the wavelength grid."""
+def _rebin_param(
+    data_lambda, data_param, wl_edges, lower_extrap, upper_extrap,
+    interpolator="conserving", fold_in=False,
+):
+    """add_points then rebin one parameter column onto the wavelength grid.
+
+    The interpolator defaults to ``"conserving"`` but a file may request ``"fractional source"`` or
+    ``"fractional target"`` (with optional ``fold_in``), matching the per-file ``interpolator``
+    option in the TUV-x config.
+    """
     x, y = add_points(data_lambda, data_param, lower_extrap, upper_extrap)
-    return interp_conserving(wl_edges, x, y)
+    if interpolator == "conserving":
+        return interp_conserving(wl_edges, x, y)
+    if interpolator == "fractional source":
+        return interp_fractional_source(wl_edges, x, y, fold_in=fold_in)
+    if interpolator == "fractional target":
+        return interp_fractional_target(wl_edges, x, y, fold_in=fold_in)
+    raise ValueError(f"unsupported cross-section interpolator: {interpolator}")
 
 
 @dataclass
@@ -117,15 +131,22 @@ class BaseCrossSection:
 
     @classmethod
     def from_files(cls, files, wl_edges) -> "BaseCrossSection":
-        """Build from a list of ``(TabulatedData, lower_extrap, upper_extrap)`` tuples (summed).
+        """Build from a list of per-file specs (summed).
 
-        Each file's first parameter is padded and conservingly rebinned onto ``wl_edges``; the
+        Each spec is ``(TabulatedData, lower_extrap, upper_extrap)`` or
+        ``(TabulatedData, lower_extrap, upper_extrap, interpolator, fold_in)``. The first parameter
+        is padded and rebinned onto ``wl_edges`` with the file's interpolator (default conserving);
         contributions are summed (matching the multi-file base cross section).
         """
         wl_edges = np.asarray(wl_edges, dtype=float)
         total = np.zeros(wl_edges.size - 1)
-        for td, lo, up in files:
-            total = total + _rebin_param(td.wavelength, td.parameters[:, 0], wl_edges, lo, up)
+        for spec in files:
+            td, lo, up = spec[0], spec[1], spec[2]
+            interp = spec[3] if len(spec) > 3 else "conserving"
+            fold_in = spec[4] if len(spec) > 4 else False
+            total = total + _rebin_param(
+                td.wavelength, td.parameters[:, 0], wl_edges, lo, up, interp, fold_in
+            )
         return cls(array=total)
 
     def evaluate(self, n_levels: int) -> np.ndarray:
