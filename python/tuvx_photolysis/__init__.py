@@ -16,6 +16,11 @@ Public API (built up across the staged port):
 
 __version__ = "0.1.0"
 
+# Match the Fortran reference, which is double precision. Must run before any JAX array is created.
+import jax as _jax
+
+_jax.config.update("jax_enable_x64", True)
+
 # Public API is wired up incrementally as the modules land (see plan stages).
 # from .api import PhotolysisCalculator  # noqa: F401  (enabled in Stage 7)
 
