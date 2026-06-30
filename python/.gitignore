@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+# generated reference fixtures (regenerate from the Fortran build)
+tests/fixtures/*.nc
