@@ -17,6 +17,12 @@ fi
 
 echo "Running tuv-x on examples/tuv_5_4.json ..."
 ( cd "$BUILD" && ./tuv-x examples/tuv_5_4.json )
-
 cp "$BUILD/photolysis_rate_constants.nc" "$HERE/tuv_5_4_reference.nc"
 echo "Wrote $HERE/tuv_5_4_reference.nc"
+
+# no-aerosol variant: exact radiation-field / J validation for the ported (non-aerosol) radiators
+echo "Running tuv-x on tuv_5_4_no_aerosol.json ..."
+cp "$HERE/tuv_5_4_no_aerosol.json" "$BUILD/examples/"
+( cd "$BUILD" && ./tuv-x examples/tuv_5_4_no_aerosol.json )
+cp "$BUILD/photolysis_rate_constants.nc" "$HERE/tuv_5_4_no_aerosol_reference.nc"
+echo "Wrote $HERE/tuv_5_4_no_aerosol_reference.nc"
